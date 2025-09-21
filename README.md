@@ -1,5 +1,6 @@
 # AutoSim
-AutoSim is an Automated Simulation Script Generator powered by LLMs to help researchers and students generate simulation scripts automatically from natural language descriptions and optional sketches.  
+**AutoSim** is an **Automated Simulation Script Generator** powered by large language models (DeepSeek and Qwen).  
+Its purpose is to help researchers and students generate simulation scripts automatically from natural language descriptions and optional sketches.  
 
 With AutoSim, you can:
 - Write a description of your simulation scenario in plain English or Chinese.
@@ -9,6 +10,14 @@ With AutoSim, you can:
   - `DSA_SIM.py`: Runs the main simulation procedure.
 - Edit and save the generated scripts directly in the GUI.
 - Track intermediate LLM outputs in a process log window.
+
+Currently, AutoSim is mainly designed for **particle-based simulations**.  
+It has built-in familiarity with the **pygamd** package and can generate scripts accordingly.  
+If you want to extend AutoSim to other types of simulations, you can simply modify or extend the instructions provided in:
+```
+autosim/data/instructions.txt
+```
+By updating this file, AutoSim can be guided to generate scripts for different simulation frameworks or problem domains.
 
 ---
 
