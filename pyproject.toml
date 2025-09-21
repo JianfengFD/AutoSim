@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autosim"
+version = "0.1.0"
+description = "AutoSim: Automated Simulation Script Generator (DeepSeek + Qwen)"
+readme = "README.md"
+authors = [{name="Fudan AutoSim Team"}]
+license = {text = "MIT"}  # SPDX 简写
+requires-python = ">=3.8"
+dependencies = [
+  "requests>=2.28"
+]
+
+[project.urls]
+Homepage = "https://example.com/autosim"
+
+# 安装后命令行入口
+[project.scripts]
+autosim = "autosim.app:run"
+
+# 可选：Windows 下 GUI 启动（无控制台）
+[project.gui-scripts]
+autosim-gui = "autosim.app:run"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["autosim*"]
+
+[tool.setuptools.package-data]
+"autosim.data" = ["*.gif", "*.txt"]

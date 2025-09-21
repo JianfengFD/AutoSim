@@ -1,0 +1,392 @@
+ 
+[两个脚本的总体说明开始]
+这两个脚本分工明确，共同完成了嵌段共聚物在带障碍物环境下的模拟。GenDSAMSI.py 负责生成初始构型。它首先定义几何障碍（如锥台体）和上下边界“床垫”，再利用 molgen 工具生成线型二嵌段共聚物（如 A5-B5），随机投放到模拟盒子中。随后脚本会检测并剔除穿入障碍或越界的链条，最后将保留的聚合物与障碍物合并为一个整体 MST 文件，并给障碍物分配极大质量以近似固定。
+DSA_DPD.py 则基于该初始构型运行动力学模拟。它调用 PYGAMD 搭建 DPD 力场，对不同粒子对设置相互作用参数，并用谐振子键维持聚合物链。上下边界通过 BounceBackConstrain 实现反弹限制。脚本采用 GWVV 积分器在 NVT 系综下推进，并定期输出快照和体系数据。运行时，障碍物因质量巨大或未被纳入积分组而保持静止，聚合物在其周围的动力学演化得以记录。
+总的来说，GenDSAMSI.py 生成带障碍的聚合物体系初始构型，DSA_DPD.py 则在此基础上施加 DPD 力场与积分推进，完成对体系动力学行为的模拟。
+[两个脚本的总体说明结束]
+[障碍物设置说明开始]
+1.  几何定义与“matress”边界：脚本用 special_shape 定义锥台体（底半径 r1、顶半径 r2、高度 h），通过 z 的线性插值计算截面半径(注意可以定义其他几何体)；用 special_shape_matress1/ special_shape_matress1 把上下薄层定义为“床垫”区，用于禁止聚合物越界。
+2.  注意通常障碍物默认放置于底部，故说其高度为h时，是指其z+Lz/2<h（注意：其中心不在z=0这点）。
+3.  体素扫描生成障碍物：gen_cols 在规则网格上扫描整个盒子，把满足形状的点写成 type='F' 的颗粒并导出 special_shape_box.mst；这些 F 粒子后续视作刚性障碍。
+4.  与聚合物合并：读取 diblock.mst 与 special_shape_box.mst 后，把障碍物颗粒拼接到末尾，并为聚合物与障碍物分别写入质量（如 1 与 1e8），使障碍近似固定；保持原聚合物键，必要时按偏移重映射。输出 DSA_SIM.mst。
+5.  动力学中的作用力与排除：在 DSA_DPD.py 中继续对 A/B 与 F 设置 DPD 力（A–F、B–F），从而自动考虑聚合物–障碍物相互作用；若不希望障碍物彼此计算相互作用，可不设置 F–F 的参数以避免多余开销。
+6.  反弹墙一致性：动力学阶段通过 BounceBackConstrain 在 z=z_mat 与 z=z_mat2 放置上下反弹平面，与生成阶段“床垫”保持一致的几何边界约束。(除非另作说明，这两个反弹墙一般保留，它在距离真正边界1.1处。因为默认的是周期性边界，防止分子越界。)
+[障碍物设置说明结束]
+[高分子拓扑设置说明开始]
+1.  线型二嵌段示例： mol1.setParticleTypes("A,A,A,A,A,B,B,B,B,B") mol1.setTopology("0-1,1-2,2-3,3-4,4-5,5-6,6-7,7-8,8-9") 上述为 10 个单体的线型 A5–B5 链；脚本随后设置键长与质量，并用 Generators 随机投放多条分子到盒子中，输出 diblock.mst。
+2.  星型拓扑示例： mol1.setParticleTypes("A,A,A,A,A,B,B,B,B,B,C,C,C,C") mol1.setTopology("0-1,1-2,2-3,3-4,4-5,5-6,6-7,7-8,8-9, 4-10,10-11,11-12,12-13") 其中“第四号 A 连接第10号的C”，即以单体 4 为星核起点，增加一条分支 4–10–11–12–13，形成“线型 + 单臂星”的复合拓扑。按相同原则可扩展到多臂星：令核心单体与各臂的首粒子相连，再为各臂写连续键即可（建议程序化生成 topo 字符串）。
+3.  其它拓扑思路： — 刷型：先写主链拓扑，再在若干主链索引处添加侧链起点的键； — 环：在线型 topo 末尾加 0-(N-1) 形成闭环； — 多嵌段星/不等臂：通过 setParticleTypes 指定每条臂的类型序列（如每臂 A→B 或 A→B→A），再写对应拓扑。
+4.  生成后的几何净化：合并前对每条链做障碍与床垫冲突检测，整链剔除；确保起始构型与障碍无穿插。 [高分子拓扑设置说明结束]
+[各个函数说明开始]
+一、系统与数据 I/O
+pygamd.snapshot.read(filename)
+功能：读取 MST 结构文件，构建系统对象。
+参数：
+— filename (str)：MST 文件名。
+要点：读取后可从 mst.data 访问 box、type、mass、bond/angle/dihedral 等字段，从 mst.pos 访问坐标数组。
+pygamd.dump.mst(info, group, file, period, properties=None, split=False)
+功能：定期输出 MST 轨迹（可拆分为多帧或单文件）。
+参数：
+— info：系统信息对象。
+— group：粒子组（如 'all'、['A','B']）。
+— file (str)：输出文件名。
+— period (int)：写出周期（步）。
+— properties (list[str]|None)：输出哪些属性，如 'position','type','velocity','mass','bond','angle'。
+— split (bool)：是否拆分成多个文件。
+pygamd.dump.data(info, group, file, period)
+功能：定期输出体系或分组的统计量到日志（如能量、温度、压力）。
+mst_write(mst, filename)（脚本内函数）
+功能：按当前坐标与类型写单帧 MST；可用于分段 run 后快速留档。
+注意：可扩展以写入速度、质量、bond 等信息。
+二、粒子组与上下文
+gala.ParticleSet(all_info, selector)
+功能：根据选择器定义粒子组。
+参数：
+— selector 可为 'all'、类型列表（如 ['A','B']）、或预定义分组名。
+gala.ComputeInfo(all_info, group)
+功能：为指定组构建额外的计算上下文。
+三、动力学与积分器
+pygamd.application.dynamics(info, dt)
+功能：创建应用对象，承载力场、约束、积分器、输出模块。
+参数：
+— dt：时间步长。
+pygamd.integration.gwvv(info, group)
+功能：常用于 DPD 的 NVT 积分器。
+参数：
+— group：参与的粒子组。
+要点：内部包含耗散/随机力更新，数值稳定。
+其它积分器（非 DPD）
+— integration.bd(info, group, temperature, gamma)：布朗动力学，带显式摩擦系数 γ，适合高阻尼系统。
+— integration.nvt(info, group, method="nh", tau, temperature)：Nose–Hoover 热浴，常用于经典 MD。
+— integration.npt(info, group, tauP, temperature, pressure)：恒压恒温积分器，模拟可变体积体系。
+— integration.langevin(info, group, gamma, temperature)：Langevin 动力学，兼具摩擦与随机扰动。
+四、非键相互作用
+pygamd.force.dpd(info, rcut=1.0)
+功能：构造 DPD 力场。
+方法：
+— setParams(type_i, type_j, alpha, sigma)。
+说明：
+— alpha 控制保守斥力强度。
+— sigma 控制随机力强度，与摩擦系数 γ 相关。
+其它常见非 DPD 力
+— force.lj(info, rcut)：Lennard-Jones 相互作用，setParams(type_i,type_j, epsilon, sigma, rcut)。
+— force.coulomb(info, rcut, dielectric)：库仑作用，适合带电体系。
+— force.yukawa(info, kappa, epsilon)：屏蔽库仑力。
+— force.table(info, filename)：用户自定义势能表。
+ 
+五、几何约束与墙
+gala.BounceBackConstrain(all_info, group)
+功能：弹性反弹边界。
+方法：
+— addWall(o_x,o_y,o_z, d_x,d_y,d_z)：定义平面墙，wall中心及法向量。
+— addCylinder(o_x,o_y,o_z, d_x,d_y,d_z, r)：定义圆柱边界。
+— addSphere(o_x,o_y,o_z, r)：定义球形边界。
+gala.LJConstrainForce(all_info, group, r_cut)
+功能：几何墙的 LJ 形式作用。
+方法：
+— setParams(type, epsilon, sigma, alpha)：设置 LJ 参数。
+— addWall / addCylinder / addSphere：几何定义与反弹边界相同。
+gala.ZeroMomentum(all_info, group)
+功能：周期性清除总动量漂移。
+六、键相互作用
+pygamd.force.bond(info, func='harmonic')
+功能：定义键相互作用。
+— harmonic：谐振子形式，参数 [k, r0]。
+非 harmonic bond force
+— FENE (finite extensible nonlinear elastic)：有限伸长非线性弹簧，参数 [k, r0, Rmax]，避免键过长断裂，常用于高分子。
+— Morse：Morse 势，参数 [D0, alpha, r0]，可模拟可断裂化学键。
+— Tabulated bond：自定义表格形式，用户提供能量/力随距离函数。
+— Cosine bond：余弦型，常用于约束聚合物主链刚度。
+角与二面角
+— force.angle(info, func='harmonic')：参数 [k, θ0]。
+— force.angle(info, func='cosine')：参数 [k, θ0]，余弦形式。
+— force.dihedral(info, func='harmonic')：参数 [k, φ0]。
+— force.dihedral(info, func='opls')：OPLS 二面角形式，参数 [k1,k2,k3,k4]，广用于有机分子。
+七、聚合物生成（molgen）
+molgen.Molecule(n)
+功能：定义 n 粒子的分子。
+— setParticleTypes("...")：定义类型序列。
+— setTopology("...")：定义键连。
+— setBondLength(l0)：设键长。
+— setMass(m)：设质量。
+molgen.Generators(Lx,Ly,Lz)
+— addMolecule(mol,count)：随机投放分子。
+— outPutMST(name)：输出 MST 文件。
+ 
+拓扑示例
+— 线型 A5-B5：
+mol1.setParticleTypes("A,A,A,A,A,B,B,B,B,B")
+mol1.setTopology("0-1,1-2,2-3,3-4,4-5,5-6,6-7,7-8,8-9")
+— 星型（在单体 4 上加一臂）：
+mol1.setParticleTypes("A,A,A,A,A,B,B,B,B,B,C,C,C,C")
+mol1.setTopology("0-1,1-2,2-3,3-4,4-5,5-6,6-7,7-8,8-9, 4-10,10-11,11-12,12-13")
+八、实践建议
+若仅需障碍物对聚合物有作用，可为 A–F、B–F 设置 DPD 力，不设 F–F。
+想模拟“软墙”，可用 LJConstrainForce 而不是粒子障碍。
+调控链刚度时，可添加 angle 或 dihedral 项，选择 harmonic/cosine/OPLS 等不同形式。
+若需断裂/化学键模拟，优先使用 Morse 或 Tabulated bond。
+[各个函数说明结束]
+ 
+[脚本GenDSAMSI.py开始]
+import numpy as np
+from poetry import molgen
+import pygamd
+from numba import cuda
+"""
+special_shape2 is used to define the matress at the bottom. The matress is represented by a number of atoms (M).
+special_shape is used to define a type of obstacle (the Frustum of a cone).
+You can also add your obstacle shape using special_shapei
+NOTE:
+(i) all special_shape should be represented using some atoms. You can use 'F','G'...
+(ii) You should ensure that all other added molecules cannot enter this obstacles
+"""
+ 
+# obstacles' (xc,yc)'s
+Cs = [[6-25, 8-25], [30-25, 8-25],[18-25,40-25]]
+ 
+Cs = [[0-25, 12-25], [-15-25, 12-25],[15-25,12-25]]
+ 
+Shs=[7,5,10] # [r1,r2,h] r1: bottom radius; r2:upper radius; h: height of the Frustum of a cone
+ 
+LL=[50,50,22] # box size
+z_mat = 1.1-LL[2]/2 # z<z_mat is the matress
+z_mat2=LL[2]/2-1.1  # z>z_mat is the upper matress
+"""
+unless you are asked to remove the matress, please keep the matress specified by special_shape.
+"""
+ 
+def special_shape(xc, yc,rc,rc2,h,Lz, x, y, z):
+    if z + Lz / 2 >= h:
+        return 0
+    r = rc + (rc2 - rc) / h * (z + Lz / 2)
+    if (x - xc) ** 2 + (y - yc) ** 2 < r ** 2:
+        return 1
+    return 0
+ 
+def special_shape_matress1(z_mat, x, y, z):
+    if z<z_mat:
+        return 1
+    return 0
+def special_shape_matress2(z_mat, x, y, z):
+    if z>z_mat:
+        return 1
+    return 0
+ 
+ 
+def gen_cols(LL,Cs,Shs):
+    Lx=LL[0];Ly=LL[1];Lz=LL[2]
+    dx = dy = dz = 0.5
+    rc = Shs[0]
+    rc2 = Shs[1]
+    h = Shs[2]
+     # example positions for protrusions
+    particles = []
+    x_values = np.arange(-Lx/2, Lx/2, dx)
+    y_values = np.arange(-Ly/2, Ly/2, dy)
+    z_values = np.arange(-Lz/2, Lz/2, dz)
+    for x in x_values:
+        for y in y_values:
+            for z in z_values:
+                for (xc, yc) in Cs:
+                    if special_shape(xc, yc,rc,rc2,h,Lz,x, y, z) == 1:
+                        particles.append([x, y, z, 'F'])
+    # Generating the MST file content
+    mst_content = f"""mst_version 1.0
+    num_particles
+    {len(particles)}
+    timestep
+    0
+    dimension
+    3
+    box
+    {Lx} {Ly} {Lz}
+    position
+    """
+    for p in particles:
+        mst_content += f"{p[0]} {p[1]} {p[2]}\n"
+ 
+    mst_content += "type\n"
+    for p in particles:
+        mst_content += f"{p[3]} \n"
+    return mst_content
+ 
+ 
+mst_BC=gen_cols(LL,Cs,Shs)
+# Save the MST content to a file
+with open("special_shape_box.mst", "w") as f:
+    f.write(mst_BC)
+ 
+ 
+mol1=molgen.Molecule(10)#particle number
+mol1.setParticleTypes("A,A,A,A,A,B,B,B,B,B")#type
+mol1.setTopology("0-1,1-2,2-3,3-4,4-5,5-6,6-7,7-8,8-9")#topology
+mol1.setBondLength(0.75)#bond length
+mol1.setMass(1.0)#mass
+ 
+gen=molgen.Generators(LL[0],LL[1],LL[2]) # box size in x, y, and z direction
+gen.addMolecule(mol1,3500)#molecule, the number of molecules
+gen.outPutMST("diblock") #file name
+# 删除与凸起边界重叠的二嵌段共聚物
+filtered_positions = []
+filtered_types = []
+ 
+# 读取生成的二嵌段共聚物
+diblock_mst = pygamd.snapshot.read("diblock.mst")
+ 
+diblock_positions = diblock_mst.data.position
+diblock_types=diblock_mst.data.type
+block_size = 10  # 一个二嵌段共聚物的分子数
+ 
+"""
+Below codes are used to ensure that other atoms, polymers will not enter those obstacles
+"""
+ 
+i = 0
+while i < len(diblock_positions):
+    overlapping = False
+    for j in range(block_size):
+        x, y, z = diblock_positions[i + j]
+        for (xc, yc) in Cs:
+            if special_shape(xc, yc, Shs[0], Shs[1], Shs[2],LL[2], x, y, z) == 1 
+               or special_shape_matress1(z_mat, x, y, z)==1 or special_shape_matress2(z_mat2, x, y, z)==1:
+                overlapping = True
+                break
+        if overlapping:
+            break
+    if not overlapping:
+        for j in range(block_size):
+            filtered_positions.append(diblock_positions[i + j])
+            filtered_types.append(diblock_types[i + j])
+    i += block_size
+ 
+# 更新 diblock_mst
+diblock_mst.data.position = filtered_positions
+diblock_mst.data.type = filtered_types
+diblock_mst.npa = len(filtered_positions)
+boundary_mst = pygamd.snapshot.read("special_shape_box.mst")
+"""
+when concatenate positions and types, boundary_mst (obstacles) should be placed at the end.
+"""
+combined_positions = np.concatenate((diblock_mst.data.position,boundary_mst.data.position))
+combined_types = np.concatenate((diblock_mst.data.type,boundary_mst.data.type ))
+combined_mst_content = f"""mst_version 1.0
+num_particles
+{len(combined_positions)}
+timestep
+0
+dimension
+ 3
+box
+{LL[0]} {LL[1]} {LL[2]}
+position
+"""
+ 
+for p in combined_positions:
+    combined_mst_content += f"{p[0]} {p[1]} {p[2]}\n"
+combined_mst_content += "type\n"
+combined_mst_content += "\n".join(combined_types)
+combined_mst_content +='\n'
+combined_mst_content += "mass\n"
+for i in range(len(diblock_mst.data.position)):
+    combined_mst_content += f"{1} \n"
+for i in range(len(boundary_mst.data.position)):
+    combined_mst_content += f"{100000000} \n"
+combined_mst_content +='\n'
+combined_mst_content += "bond\n"
+Init_No_diblock = 0
+for p in diblock_mst.data.bond:
+    combined_mst_content += f"{p[0]} {p[1]+Init_No_diblock} {p[2]+Init_No_diblock}\n"
+"""
+If more other atoms, molecules or polymers(diblock,homopoly,other copoly) are presented,
+you should be careful about the atom labelling. the following example is about how to add more bonds
+if a polymer CCCC is added
+Init_No_CCCC = Init_No_diblock+len(diblock_mst.data.position)
+for p in cccc_mst.data.bond:
+    combined_mst_content += f"{p[0]} {p[1]+Init_No_cccc} {p[2]+Init_No_cccc}\n"
+"""
+# 保存合并后的 MST 文件
+with open("DSA_SIM.mst", "w") as f:
+    f.write(combined_mst_content)
+[脚本GenDSAMSI.py结束]
+ 
+[脚本DSA_DPD.py开始]
+import numpy as np
+import pygamd
+from poetry import cu_gala as gala
+from numba import cuda
+ 
+ 
+def mst_write(mst,filename):
+    mst_content = f"""mst_version 1.0
+    num_particles
+    {len(mst.pos)}
+    timestep
+    {num_steps}
+    dimension
+     3
+    box
+    {mst.data.box[0]} {mst.data.box[1]} {mst.data.box[2]}
+    position
+    """
+    for p in mst.pos:
+        mst_content += f"{p[0]} {p[1]} {p[2]}\n"
+    mst_content += "type\n"
+    mst_content += "\n".join(mst.data.type)
+    with open(filename, "w") as f:
+        f.write(mst_content)
+ 
+ 
+# 读取合并后的 MST 文件
+mst = pygamd.snapshot.read("combined_system.mst")
+LLz=mst.data.box[2]
+z_mat = 1.1-LLz/2.0;z_mat2 = -1.1+LLz/2.0;
+ 
+# 创建应用程序
+app = pygamd.application.dynamics(info=mst, dt=0.02)
+ 
+# 添加力场
+ 
+fn = pygamd.force.dpd(info=mst, rcut=1.0)
+fn.setParams(type_i="A", type_j="A", alpha=25.0, sigma=3.0)
+fn.setParams(type_i="B", type_j="B", alpha=25.0, sigma=3.0)
+fn.setParams(type_i="A", type_j="B", alpha=40.0, sigma=3.0)
+fn.setParams(type_i="B", type_j="F", alpha=40.0, sigma=3.0) # Repulsive force between B and F
+fn.setParams(type_i="A", type_j="F", alpha=25.0, sigma=3.0) # so A will be effectively attracted by F
+app.add(fn)
+fb = pygamd.force.bond(info=mst, func='harmonic')
+fb.setParams(bond_type = 'A-A', param=[4.0, 0.0])# param=[k, r0]
+fb.setParams(bond_type = 'A-B', param=[4.0, 0.0])# param=[k, r0]
+fb.setParams(bond_type = 'B-B', param=[4.0, 0.0])# param=[k, r0]
+app.add(fb)
+# 添加恒温器
+ 
+bbc = gala.BounceBackConstrain(mst, ['A','B'])
+bbc.addWall(0.0,0.0, z_mat, 0.0, 0.0, 1.0)  # lower wall
+bbc.addWall(0.0,0.0, z_mat2, 0.0,0.0, -1.0) # upper wall
+app.add(bbc)
+ 
+gw = pygamd.integration.gwvv(info=mst, group=['A','B'])
+app.add(gw)
+ 
+# 添加数据输出模块
+dm = pygamd.dump.mst(info=mst, group=['A', 'B','F'], file='p.mst', period=10000)
+app.add(dm)
+ 
+di = pygamd.dump.data(info=mst, group='all', file='data.log', period=100)
+app.add(di)
+ 
+# 设置 F 和 M 分子的初始位置和索引
+positions = mst.data.position
+initial_positions = positions.copy()
+f_indices = np.array([i for i, t in enumerate(mst.data.type) if t in ['F']])
+ 
+ 
+# 运行模拟并定期复原 F 和 M 分子位置
+num_steps = 100*10001
+steps_per_run = 10000
+ 
+for step in range(0, num_steps, steps_per_run):
+    app.run(steps_per_run)
+    mst_write(mst,'p'+str(step)+'.mst')
+    print('p'+str(step)+'.mst'+' saved')
+[脚本DSA_DPD.py结束]
